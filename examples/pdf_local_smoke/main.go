@@ -30,14 +30,15 @@ type smokeResult struct {
 }
 
 func main() {
-	if len(os.Args) != 5 {
-		exitf("usage: go run ./examples/pdf_local_smoke/main.go <pdf> <cert.pem> <key.pem> <output.pdf>")
+	if len(os.Args) != 6 {
+		exitf("usage: go run ./examples/pdf_local_smoke/main.go <pdf> <cert.pem> <key.pem> <cert-serial> <output.pdf>")
 	}
 
 	pdfPath := os.Args[1]
 	certPath := os.Args[2]
 	keyPath := os.Args[3]
-	outputPath := os.Args[4]
+	certSerial := os.Args[4]
+	outputPath := os.Args[5]
 
 	pdfBytes, err := os.ReadFile(pdfPath)
 	if err != nil {
@@ -87,6 +88,7 @@ func main() {
 				"data": map[string]interface{}{
 					"signature":   base64.StdEncoding.EncodeToString(signature),
 					"certificate": string(certPEMBytes),
+					"certSerialNumber": certSerial,
 				},
 			}, nil
 		},

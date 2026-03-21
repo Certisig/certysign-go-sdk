@@ -37,7 +37,7 @@ import (
 const (
 	sigPlaceholderLength = 32768 // hex chars (16384 bytes)
 	stampWidth           = 260.0
-	stampHeight          = 58.0
+	stampHeight          = 56.0
 	stampPaddingX        = 8.0
 	stampPaddingY        = 8.0
 	stampFontSize        = 7.0
@@ -180,7 +180,7 @@ func (e *SignatureEmbedder) EmbedInPDF(pdfData []byte, opts EmbedInPDFOptions) (
 	// Build text lines for visual stamp
 	stampLines := []string{
 		fmt.Sprintf("Digitally signed by: %s", signerEmail),
-		fmt.Sprintf("Date: %s", signDate.Format(time.RFC3339)),
+		fmt.Sprintf("Date: %s", nodeISOTimestamp(signDate)),
 		fmt.Sprintf("Certificate: %s", certSerial),
 		fmt.Sprintf("Standard: %s", standard),
 	}
@@ -202,7 +202,7 @@ func (e *SignatureEmbedder) EmbedInPDF(pdfData []byte, opts EmbedInPDFOptions) (
 		return nil, fmt.Errorf("certysign: EmbedInPDF: could not locate /Contents placeholder in PDF output")
 	}
 
-	contentsStart := placeholderIdx - 1  // '<' angle bracket
+	contentsStart := placeholderIdx - 1 // '<' angle bracket
 	contentsEnd := placeholderIdx + sigPlaceholderLength + 1
 
 	total := len(pdfBuf)
@@ -288,7 +288,7 @@ type EmbedInXMLOptions struct {
 	DocumentHash     string
 	HashAlgorithm    string
 	CertSerialNumber string
-	SignerEmail       string
+	SignerEmail      string
 	Timestamp        string
 	Standard         string
 }
@@ -421,7 +421,7 @@ type EmbedInJSONOptions struct {
 	DocumentHash     string
 	HashAlgorithm    string
 	Algorithm        string
-	SignerEmail       string
+	SignerEmail      string
 	CertSerialNumber string
 	Timestamp        string
 	Standard         string
@@ -500,72 +500,113 @@ func injectPDFSignatureField(
 	stampLines []string,
 	signDate time.Time,
 	signerEmail, reason, location string,
-	_ int, // page — reserved for future per-page placement (requires full PDF xref parse)
+	page int,
 ) ([]byte, int, error) {
-	// Build stamp content stream
-	stampStream := buildStampStream(stampX, stampY, stampLines)
+	pageObjs := findPageObjectNumbers(pdfData)
+	if len(pageObjs) == 0 {
+		return nil, 0, fmt.Errorf("certysign: EmbedInPDF: could not find any /Page objects")
+	}
+	pageIdx := len(pageObjs) - 1
+	if page > 0 && page <= len(pageObjs) {
+		pageIdx = page - 1
+	}
+	pageObjNum := pageObjs[pageIdx]
+	pageDict := findObjectBody(pdfData, pageObjNum)
+	if pageDict == "" {
+		return nil, 0, fmt.Errorf("certysign: EmbedInPDF: could not read target page object")
+	}
 
-	// Build a minimal incremental PDF update.
-	// We append the stamp stream object, sig dict, widget annotation, and updated xref.
-	// This approach is safe because it doesn't reparse/rewrite the existing PDF.
+	catalogObjNum := findCatalogObjectNumber(pdfData)
+	if catalogObjNum == 0 {
+		return nil, 0, fmt.Errorf("certysign: EmbedInPDF: could not find /Catalog object")
+	}
+	catalogDict := findObjectBody(pdfData, catalogObjNum)
+	if catalogDict == "" {
+		return nil, 0, fmt.Errorf("certysign: EmbedInPDF: could not read catalog object")
+	}
 
-	// Find highest object number in existing PDF
 	maxObj := findMaxObjectNumber(pdfData)
-	stampObjNum := maxObj + 1
+	appearanceObjNum := maxObj + 1
 	sigObjNum := maxObj + 2
 	widgetObjNum := maxObj + 3
+	annotsObjNum := maxObj + 4
+	acroFormObjNum := maxObj + 5
 
 	var buf bytes.Buffer
 	buf.Write(pdfData)
 
-	startOffset := len(pdfData)
+	offsets := map[int]int{}
 
-	// Object: stamp XObject content stream
-	stampObjOffset := buf.Len()
-	fmt.Fprintf(&buf, "%d 0 obj\n<< /Length %d >>\nstream\n%s\nendstream\nendobj\n",
-		stampObjNum, len(stampStream), stampStream)
+	appearanceStream := buildStampAppearanceStream(stampLines)
+	offsets[appearanceObjNum] = buf.Len()
+	fmt.Fprintf(
+		&buf,
+		"%d 0 obj\n<< /Type /XObject /Subtype /Form /FormType 1 /BBox [0 0 %.2f %.2f] /Resources << /Font << /Helvetica << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> >> >> /Length %d >>\nstream\n%s\nendstream\nendobj\n",
+		appearanceObjNum,
+		stampWidth,
+		stampHeight,
+		len(appearanceStream),
+		appearanceStream,
+	)
 
-	// Build /Contents value: placeholder hex string
 	placeholder := strings.Repeat("0", sigPlaceholderLength)
 
-	// Object: signature dictionary
-	sigObjOffset := buf.Len()
+	offsets[sigObjNum] = buf.Len()
 	sigDictContent := buildSigDictBytes(placeholder, signerEmail, reason, location, signDate)
 	fmt.Fprintf(&buf, "%d 0 obj\n%s\nendobj\n", sigObjNum, sigDictContent)
 
-	// Object: signature widget annotation
-	widgetObjOffset := buf.Len()
-	fmt.Fprintf(&buf, "%d 0 obj\n<< /Type /Annot /Subtype /Widget /FT /Sig /T (Signature1) /V %d 0 R /Rect [0 0 0 0] /P 1 0 R >>\nendobj\n",
-		widgetObjNum, sigObjNum)
+	offsets[widgetObjNum] = buf.Len()
+	fmt.Fprintf(
+		&buf,
+		"%d 0 obj\n<< /Type /Annot /Subtype /Widget /FT /Sig /T (Signature1) /V %d 0 R /Rect [%.2f %.2f %.2f %.2f] /F 4 /P %d 0 R /AP << /N %d 0 R >> >>\nendobj\n",
+		widgetObjNum,
+		sigObjNum,
+		stampX,
+		stampY,
+		stampX+stampWidth,
+		stampY+stampHeight,
+		pageObjNum,
+		appearanceObjNum,
+	)
 
-	// Incremental xref section
+	existingAnnots := extractRefOrArray(pageDict, "/Annots")
+	mergedAnnots := mergeRefOrArray(existingAnnots, fmt.Sprintf("%d 0 R", widgetObjNum))
+	offsets[annotsObjNum] = buf.Len()
+	fmt.Fprintf(&buf, "%d 0 obj\n%s\nendobj\n", annotsObjNum, mergedAnnots)
+
+	pageDict = upsertRefEntry(pageDict, "/Annots", fmt.Sprintf("%d 0 R", annotsObjNum))
+	offsets[pageObjNum] = buf.Len()
+	fmt.Fprintf(&buf, "%d 0 obj\n%s\nendobj\n", pageObjNum, pageDict)
+
+	offsets[acroFormObjNum] = buf.Len()
+	fmt.Fprintf(&buf, "%d 0 obj\n<< /Fields [%d 0 R] /SigFlags 3 >>\nendobj\n", acroFormObjNum, widgetObjNum)
+
+	catalogDict = upsertRefEntry(catalogDict, "/AcroForm", fmt.Sprintf("%d 0 R", acroFormObjNum))
+	offsets[catalogObjNum] = buf.Len()
+	fmt.Fprintf(&buf, "%d 0 obj\n%s\nendobj\n", catalogObjNum, catalogDict)
+
 	xrefOffset := buf.Len()
-	fmt.Fprintf(&buf, "xref\n%d 3\n", stampObjNum)
-	fmt.Fprintf(&buf, "%010d 00000 n \n", stampObjOffset)
-	fmt.Fprintf(&buf, "%010d 00000 n \n", sigObjOffset)
-	fmt.Fprintf(&buf, "%010d 00000 n \n", widgetObjOffset)
+	writeIncrementalXref(&buf, offsets)
 
-	// Trailer pointing to new xref
 	prevXRef := findLastXRefOffset(pdfData)
-	fmt.Fprintf(&buf, "trailer\n<< /Size %d /Prev %d >>\nstartxref\n%d\n%%%%EOF\n",
-		widgetObjNum+1, prevXRef, xrefOffset)
+	fmt.Fprintf(&buf, "trailer\n<< /Size %d /Prev %d /Root %d 0 R >>\nstartxref\n%d\n%%%%EOF\n",
+		maxInt(maxObj, acroFormObjNum)+1, prevXRef, catalogObjNum, xrefOffset)
 
-	_ = startOffset
-	return buf.Bytes(), sigObjOffset, nil
+	return buf.Bytes(), sigObjNum, nil
 }
 
-func buildStampStream(x, y float64, lines []string) string {
+func buildStampAppearanceStream(lines []string) string {
 	var b strings.Builder
 	b.WriteString("q\n")
 	b.WriteString("0.97 0.97 0.97 rg\n")
 	b.WriteString("0.4 0.4 0.4 RG\n")
 	b.WriteString("0.75 w\n")
-	fmt.Fprintf(&b, "%.2f %.2f %.2f %.2f re B\n", x, y, stampWidth, stampHeight)
+	fmt.Fprintf(&b, "0 0 %.2f %.2f re B\n", stampWidth, stampHeight)
 	b.WriteString("BT\n")
 	fmt.Fprintf(&b, "/Helvetica %.1f Tf\n", stampFontSize)
 	b.WriteString("0.4 0.4 0.4 rg\n")
-	textY := y + stampHeight - stampPaddingY - stampFontSize
-	fmt.Fprintf(&b, "%.2f %.2f Td\n", x+stampPaddingX, textY)
+	textY := stampHeight - stampPaddingY - stampFontSize
+	fmt.Fprintf(&b, "%.2f %.2f Td\n", stampPaddingX, textY)
 	for _, line := range lines {
 		safe := strings.ReplaceAll(line, "\\", "\\\\")
 		safe = strings.ReplaceAll(safe, "(", "\\(")
@@ -574,6 +615,139 @@ func buildStampStream(x, y float64, lines []string) string {
 	}
 	b.WriteString("ET\nQ\n")
 	return b.String()
+}
+
+func writeIncrementalXref(buf *bytes.Buffer, offsets map[int]int) {
+	keys := make([]int, 0, len(offsets))
+	for objNum := range offsets {
+		keys = append(keys, objNum)
+	}
+	sortInts(keys)
+	buf.WriteString("xref\n")
+	for i := 0; i < len(keys); {
+		start := keys[i]
+		j := i + 1
+		for j < len(keys) && keys[j] == keys[j-1]+1 {
+			j++
+		}
+		fmt.Fprintf(buf, "%d %d\n", start, j-i)
+		for _, objNum := range keys[i:j] {
+			fmt.Fprintf(buf, "%010d 00000 n \n", offsets[objNum])
+		}
+		i = j
+	}
+}
+
+func sortInts(values []int) {
+	for i := 1; i < len(values); i++ {
+		j := i
+		for j > 0 && values[j-1] > values[j] {
+			values[j-1], values[j] = values[j], values[j-1]
+			j--
+		}
+	}
+}
+
+func extractRefOrArray(dictBody, key string) string {
+	re := regexp.MustCompile(regexp.QuoteMeta(key) + `\s+(\[[^\]]*\]|\d+\s+\d+\s+R)`)
+	match := re.FindStringSubmatch(dictBody)
+	if len(match) < 2 {
+		return ""
+	}
+	return strings.TrimSpace(match[1])
+}
+
+func mergeRefOrArray(existingValue, newRef string) string {
+	existingValue = strings.TrimSpace(existingValue)
+	if existingValue == "" {
+		return fmt.Sprintf("[%s]", newRef)
+	}
+	if strings.HasPrefix(existingValue, "[") && strings.HasSuffix(existingValue, "]") {
+		inner := strings.TrimSpace(existingValue[1 : len(existingValue)-1])
+		if inner == "" {
+			return fmt.Sprintf("[%s]", newRef)
+		}
+		return fmt.Sprintf("[%s %s]", inner, newRef)
+	}
+	return fmt.Sprintf("[%s %s]", existingValue, newRef)
+}
+
+func upsertRefEntry(dictBody, key, refValue string) string {
+	re := regexp.MustCompile(regexp.QuoteMeta(key) + `\s+(\[[^\]]*\]|\d+\s+\d+\s+R)`)
+	replacement := fmt.Sprintf("%s %s", key, refValue)
+	if re.MatchString(dictBody) {
+		return re.ReplaceAllString(dictBody, replacement)
+	}
+
+	idx := strings.LastIndex(dictBody, ">>")
+	if idx < 0 {
+		return dictBody
+	}
+	prefix := dictBody[:idx]
+	if !strings.HasSuffix(prefix, "\n") {
+		prefix += "\n"
+	}
+	return prefix + replacement + "\n>>"
+}
+
+func findObjectBody(pdfData []byte, objNum int) string {
+	re := regexp.MustCompile(`(?s)(\d+)\s+0\s+obj\s*(.*?)\s*endobj`)
+	matches := re.FindAllSubmatch(pdfData, -1)
+	var lastBody []byte
+	for _, match := range matches {
+		n, _ := strconv.Atoi(string(match[1]))
+		if n == objNum {
+			lastBody = match[2]
+		}
+	}
+	if len(lastBody) == 0 {
+		return ""
+	}
+	return strings.TrimSpace(string(lastBody))
+}
+
+func findPageObjectNumbers(pdfData []byte) []int {
+	re := regexp.MustCompile(`(?s)(\d+)\s+0\s+obj(.*?)endobj`)
+	pageTypeRe := regexp.MustCompile(`/Type\s*/Page\b`)
+	matches := re.FindAllSubmatch(pdfData, -1)
+	pages := make([]int, 0)
+	seen := map[int]bool{}
+	for _, match := range matches {
+		body := string(match[2])
+		if pageTypeRe.MatchString(body) {
+			objNum, _ := strconv.Atoi(string(match[1]))
+			if !seen[objNum] {
+				pages = append(pages, objNum)
+				seen[objNum] = true
+			}
+		}
+	}
+	return pages
+}
+
+func findCatalogObjectNumber(pdfData []byte) int {
+	re := regexp.MustCompile(`(?s)(\d+)\s+0\s+obj(.*?)endobj`)
+	catalogTypeRe := regexp.MustCompile(`/Type\s*/Catalog\b`)
+	matches := re.FindAllSubmatch(pdfData, -1)
+	for _, match := range matches {
+		body := string(match[2])
+		if catalogTypeRe.MatchString(body) {
+			objNum, _ := strconv.Atoi(string(match[1]))
+			return objNum
+		}
+	}
+	return 0
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func nodeISOTimestamp(t time.Time) string {
+	return t.UTC().Format("2006-01-02T15:04:05.000Z")
 }
 
 func buildSigDictBytes(placeholder, signerName, reason, location string, signDate time.Time) string {
@@ -789,10 +963,10 @@ func buildPKCS7(rawSigB64, certPEM, chainPEM string, tsaTokenDER []byte) ([]byte
 	var certsImplicit asn1.RawValue
 	if certsRaw.Len() > 0 {
 		certsImplicit = asn1.RawValue{
-			Class:       asn1.ClassContextSpecific,
-			Tag:         0,
-			IsCompound:  true,
-			Bytes:       certsRaw.Bytes(),
+			Class:      asn1.ClassContextSpecific,
+			Tag:        0,
+			IsCompound: true,
+			Bytes:      certsRaw.Bytes(),
 		}
 	}
 
@@ -850,7 +1024,7 @@ func buildPKCS7(rawSigB64, certPEM, chainPEM string, tsaTokenDER []byte) ([]byte
 		DigestAlgorithms: []algorithmIdentifier{{Algorithm: oidSHA256, Parameters: null}},
 		EncapContentInfo: encapsulatedContentInfo{EContentType: oidData},
 		Certificates:     certsImplicit,
-		SignerInfos:       []signerInfo{si},
+		SignerInfos:      []signerInfo{si},
 	}
 
 	sdBytes, err := asn1.Marshal(sd)
