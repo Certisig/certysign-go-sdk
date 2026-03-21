@@ -1,0 +1,10 @@
+bin/
+dist/
+coverage.out
+*.test
+*.pdf
+*.pem
+*.key
+*.crt
+*.log
+.env
