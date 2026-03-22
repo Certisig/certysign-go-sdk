@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	certysign "github.com/certysign/sdk-go/certysign"
+	certysign "github.com/Certisig/certysign-go-sdk/certysign"
 )
 
 // ---------------------------------------------------------------------------

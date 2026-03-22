@@ -15,7 +15,7 @@ import (
 	"os"
 	"path/filepath"
 
-	certysign "github.com/certysign/sdk-go/certysign"
+	certysign "github.com/Certisig/certysign-go-sdk/certysign"
 )
 
 type smokeResult struct {

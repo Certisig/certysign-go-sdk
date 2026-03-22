@@ -22,7 +22,7 @@ package certysign
 
 import "fmt"
 
-const sdkVersion = "1.3.1"
+const sdkVersion = "1.3.2"
 
 // Environment constants.
 const (

@@ -1,6 +1,6 @@
 # CertySign SDK — Go
 
-[![Go Reference](https://pkg.go.dev/badge/github.com/certysign/sdk-go.svg)](https://pkg.go.dev/github.com/certysign/sdk-go)
+[![Go Reference](https://pkg.go.dev/badge/github.com/Certisig/certysign-go-sdk.svg)](https://pkg.go.dev/github.com/Certisig/certysign-go-sdk)
 [![Go 1.21+](https://img.shields.io/badge/go-1.21+-blue.svg)](https://go.dev)
 
 Official Go SDK for the [CertySign Trust Services](https://certysign.io) platform. Mirrors the `@certysign/sdk` Node.js package feature-for-feature.
@@ -12,7 +12,7 @@ Official Go SDK for the [CertySign Trust Services](https://certysign.io) platfor
 ## Installation
 
 ```bash
-go get github.com/certysign/sdk-go
+go get github.com/Certisig/certysign-go-sdk@v1.3.2
 ```
 
 ---
@@ -25,7 +25,7 @@ package main
 import (
     "fmt"
     "log"
-    "github.com/certysign/sdk-go/certysign"
+    "github.com/Certisig/certysign-go-sdk/certysign"
 )
 
 func main() {
